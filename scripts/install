@@ -34,6 +34,11 @@ if [ -x $COUCHDB ]; then
     python ./compare-version.py "$COUCHDB_VERSION" '<' '2.0.0' \
       || (echo "You need a CouchDB version prior to 2.0.0 (currently $COUCHDB_VERSION)"  && exit 1)
 else
+    # Install Erlang with standard Debian version
+    sudo rm -f /etc/apt/sources.list.d/erlang-solutions.list
+    sudo apt-get update -y
+    sudo apt-get install erlang-nox erlang-dev -y
+
     # Add repository
     echo "deb http://binaries.erlang-solutions.com/debian jessie contrib" \
       | sudo tee /etc/apt/sources.list.d/erlang-solutions.list
@@ -42,55 +47,61 @@ else
     sudo apt-get update -y
 
     # Install dependencies
-    sudo apt-get install -y libmozjs185 libmozjs185-dev erlang-nox erlang-dev build-essential libnspr4 libnspr4-0d libnspr4-dev libcurl4-openssl-dev curl libicu-dev pwgen
+    sudo apt-get install -y libmozjs185-1.0 libmozjs185-dev build-essential libnspr4 libnspr4-0d libnspr4-dev libcurl4-openssl-dev curl libicu-dev pwgen
 
     # Setup a CouchDB account
-    sudo useradd -d /var/lib/couchdb couchdb
+    id couchdb >/dev/null 2>&1 || sudo useradd -d /var/lib/couchdb couchdb
     sudo mkdir -p /usr/local/{lib,etc}/couchdb /usr/local/var/{lib,log,run}/couchdb /var/lib/couchdb
     sudo chown -R couchdb:couchdb /usr/local/{lib,etc}/couchdb /usr/local/var/{lib,log,run}/couchdb
     sudo chmod -R g+rw /usr/local/{lib,etc}/couchdb /usr/local/var/{lib,log,run}/couchdb
 
     # Compile CouchDB
-    wget http://www.apache.org/dyn/closer.cgi?path=/couchdb/source/1.6.1/apache-couchdb-1.6.1.tar.gz
+    wget http://www.eu.apache.org/dist/couchdb/source/1.6.1/apache-couchdb-1.6.1.tar.gz
     tar xzf apache-couchdb-*.tar.gz
-    cd apache-couchdb-*
+    pushd apache-couchdb-*
     ./configure --prefix=/usr/local --with-js-lib=/usr/lib --with-js-include=/usr/include/mozjs --enable-init
     make
     sudo make install
+    popd
 
     # Link init file
-    sudo ln -s /usr/local/etc/init.d/couchdb /etc/init.d/couchdb
+    sudo ln -sf /usr/local/etc/init.d/couchdb /etc/init.d/couchdb
     sudo systemctl enable couchdb
 
     # Add YunoHost service
-    sudo yunohost service add couchdb -l /var/log/couchdb/couch.log
+    sudo yunohost service add couchdb -l /var/log/couchdb/couch.log \
+      || echo "Service already added"
 fi
+
+# Start CouchDB
+sudo systemctl start couchdb \
+  || sudo systemctl restart couchdb
 
 
 # Install cozy-controller and monitor
 [ -d /usr/local/lib/node_modules/cozy-controller ] \
-  || npm install -g cozy-controller
+  || sudo npm install -g cozy-controller
 
 [ -d /usr/local/lib/node_modules/cozy-monitor ] \
-  || npm install -g cozy-monitor 
+  || sudo npm install -g cozy-monitor
 
 
 # Create UNIX users for Cozy
-id cozy >/dev/null 2>&1 || useradd -M cozy
-id cozy-data-system >/dev/null 2>&1 || useradd -M cozy-data-system
-id cozy-home >/dev/null 2>&1 || useradd -M cozy-home
+id cozy >/dev/null 2>&1 || sudo useradd -M cozy
+id cozy-data-system >/dev/null 2>&1 || sudo useradd -M cozy-data-system
+id cozy-home >/dev/null 2>&1 || sudo useradd -M cozy-home
 
 
 # Create configuration directory
-[ -d /etc/cozy ] || mkdir /etc/cozy
-chown -hR cozy /etc/cozy
+[ -d /etc/cozy ] || sudo mkdir /etc/cozy
+sudo chown -hR cozy /etc/cozy
 
 
 # Useful function
 function check_start () {
     for i in {0..20}; do
         sleep 5 
-        curl -s 127.0.0.1:$1 >/dev/null && return 0
+        curl -s 127.0.0.1:$1 >/dev/null && return 0 \
           || echo "Retrying to reach 127.0.0.1:$1 ..."
     done
     return 1
@@ -115,7 +126,23 @@ sudo chmod 640 /etc/cozy/couchdb.login
 
 # Configure Cozy Indexer
 INDEXER_DIR=/var/lib/cozy-indexer
-[ -d $INDEXER_DIR ] || sudo mkdir -p $INDEXER_DIR
+function install_indexer () {
+    sudo apt-get install python python-pip python-dev libxml2-dev libxslt1-dev python-dateutil python-whoosh python-tornado -y
+    sudo pip install virtualenv
+    sudo git clone https://github.com/cozy/cozy-data-indexer $INDEXER_DIR
+    sudo chown admin $INDEXER_DIR
+    pushd $INDEXER_DIR
+    virtualenv ve
+    source ve/bin/activate
+    pip install -r requirements/common.txt
+    cat <<< '#!/bin/bash
+cd /var/lib/cozy-indexer
+source ve/bin/activate
+python server.py' > cozy-indexer
+    chmod +x cozy-indexer
+    popd
+}
+[ -d $INDEXER_DIR ] || install_indexer
 sudo chown cozy:cozy $INDEXER_DIR
 
 sudo cp ../conf/cozy-indexer.service /etc/systemd/system/
@@ -127,7 +154,7 @@ check_start 9102 || (echo "cozy-indexer failed to start" && exit 1)
 
 
 # Configure Cozy Controller
-sudo cp ../conf/cozy-controller /etc/systemd/system/
+sudo cp ../conf/cozy-controller.service /etc/systemd/system/
 sudo systemctl start cozy-controller \
   || sudo systemctl restart cozy-controller
 sudo systemctl enable cozy-controller
@@ -136,6 +163,8 @@ check_start 9002 || (echo "cozy-controller failed to start" && exit 1)
 
 
 # Install Cozy platform apps
+coffee -v > /dev/null 2>&1 || sudo npm install -g coffee-script
+
 [ -d /usr/local/cozy/apps/data-system ] \
   || sudo cozy-monitor install-cozy-stack
 sudo cozy-monitor start data-system
@@ -149,9 +178,12 @@ sudo cozy-monitor start home
 sudo cozy-monitor start proxy
 
 
-# Set Cozy domain
+# Set Cozy domain and background
 sudo coffee /usr/local/cozy/apps/home/commands.coffee setdomain $domain \
   || echo "Domain already set"
+curl -X POST http://localhost:9103/api/instance \
+  -H "Content-Type: application/json" \
+  -d '{"background":"background-07"}'
 
 
 # Install default applications

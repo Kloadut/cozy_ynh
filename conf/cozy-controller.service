@@ -1,5 +1,5 @@
 [Service]
-ExecStart=cozy-controller
+ExecStart=/usr/local/bin/cozy-controller
 Restart=always
 StandardOutput=syslog
 StandardError=syslog

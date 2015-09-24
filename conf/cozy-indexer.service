@@ -1,6 +1,5 @@
 [Service]
-RootDirectory=/var/lib/cozy-indexer
-ExecStart=cozy-indexer
+ExecStart=/var/lib/cozy-indexer/cozy-indexer
 Restart=always
 StandardOutput=syslog
 StandardError=syslog
