@@ -1,0 +1,175 @@
+#!/bin/bash
+
+set -e
+
+# Retrieve argument
+domain=$1
+
+# Ensure that it is installed on Debian Jessie
+VERSION=$(sed 's/\..*//' /etc/debian_version)
+if [[ "$VERSION" == '7' ]]; then
+    echo "You need at least Debian 8 (Jessie) to run this app" && exit 1
+fi
+
+# Check domain/path availability
+sudo yunohost app checkurl $domain/ -a cozy
+
+# Check Node.JS version
+NODEJS=`which node || echo 1`
+if [ -x $NODEJS ]; then
+    NODE_VERSION=`$NODEJS -v`
+    python ./compare-version.py "$NODE_VERSION" '>=' '0.10.20' \
+      || (echo "You need a NodeJS version between 0.10.20 and 0.11.x (currently $NODE_VERSION)" && exit 1)
+    python ./compare-version.py "$NODE_VERSION" '<' '0.12.00' \
+      || (echo "You need a NodeJS version between 0.10.20 and 0.11.x (currently $NODE_VERSION)" && exit 1)
+else
+    sudo apt-get update
+    sudo apt-get install nodejs nodejs-legacy npm -y
+fi
+
+# Install CouchDB
+COUCHDB=`which couchdb || echo 1`
+if [ -x $COUCHDB ]; then
+    COUCHDB_VERSION=`couchdb -V | head -n 1 | sed 's/.* Apache CouchDB //'`
+    python ./compare-version.py "$COUCHDB_VERSION" '<' '2.0.0' \
+      || (echo "You need a CouchDB version prior to 2.0.0 (currently $COUCHDB_VERSION)"  && exit 1)
+else
+    # Add repository
+    echo "deb http://binaries.erlang-solutions.com/debian jessie contrib" \
+      | sudo tee /etc/apt/sources.list.d/erlang-solutions.list
+    wget -O - http://binaries.erlang-solutions.com/debian/erlang_solutions.asc \
+      | sudo apt-key add -
+    sudo apt-get update -y
+
+    # Install dependencies
+    sudo apt-get install -y libmozjs185 libmozjs185-dev erlang-nox erlang-dev build-essential libnspr4 libnspr4-0d libnspr4-dev libcurl4-openssl-dev curl libicu-dev pwgen
+
+    # Setup a CouchDB account
+    sudo useradd -d /var/lib/couchdb couchdb
+    sudo mkdir -p /usr/local/{lib,etc}/couchdb /usr/local/var/{lib,log,run}/couchdb /var/lib/couchdb
+    sudo chown -R couchdb:couchdb /usr/local/{lib,etc}/couchdb /usr/local/var/{lib,log,run}/couchdb
+    sudo chmod -R g+rw /usr/local/{lib,etc}/couchdb /usr/local/var/{lib,log,run}/couchdb
+
+    # Compile CouchDB
+    wget http://www.apache.org/dyn/closer.cgi?path=/couchdb/source/1.6.1/apache-couchdb-1.6.1.tar.gz
+    tar xzf apache-couchdb-*.tar.gz
+    cd apache-couchdb-*
+    ./configure --prefix=/usr/local --with-js-lib=/usr/lib --with-js-include=/usr/include/mozjs --enable-init
+    make
+    sudo make install
+
+    # Link init file
+    sudo ln -s /usr/local/etc/init.d/couchdb /etc/init.d/couchdb
+    sudo systemctl enable couchdb
+
+    # Add YunoHost service
+    sudo yunohost service add couchdb -l /var/log/couchdb/couch.log
+fi
+
+
+# Install cozy-controller and monitor
+[ -d /usr/local/lib/node_modules/cozy-controller ] \
+  || npm install -g cozy-controller
+
+[ -d /usr/local/lib/node_modules/cozy-monitor ] \
+  || npm install -g cozy-monitor 
+
+
+# Create UNIX users for Cozy
+id cozy >/dev/null 2>&1 || useradd -M cozy
+id cozy-data-system >/dev/null 2>&1 || useradd -M cozy-data-system
+id cozy-home >/dev/null 2>&1 || useradd -M cozy-home
+
+
+# Create configuration directory
+[ -d /etc/cozy ] || mkdir /etc/cozy
+chown -hR cozy /etc/cozy
+
+
+# Useful function
+function check_start () {
+    for i in {0..20}; do
+        sleep 5 
+        curl -s 127.0.0.1:$1 >/dev/null && return 0
+          || echo "Retrying to reach 127.0.0.1:$1 ..."
+    done
+    return 1
+}
+
+# Generate CouchDB tokens
+function generate_tokens () {
+  pwgen -1 | sudo tee /etc/cozy/couchdb.login
+  pwgen -1 | sudo tee -a /etc/cozy/couchdb.login
+
+  check_start 5984 || (echo "CouchDB failed to start" && exit 1)
+
+  curl -s -X PUT \
+    127.0.0.1:5984/_config/admins/$(head -n1 /etc/cozy/couchdb.login) \
+    -d "\"$(tail -n1 /etc/cozy/couchdb.login)\""
+}
+
+[ -f /etc/cozy/couchdb.login ] || generate_tokens
+sudo chown cozy-data-system /etc/cozy/couchdb.login
+sudo chmod 640 /etc/cozy/couchdb.login
+
+
+# Configure Cozy Indexer
+INDEXER_DIR=/var/lib/cozy-indexer
+[ -d $INDEXER_DIR ] || sudo mkdir -p $INDEXER_DIR
+sudo chown cozy:cozy $INDEXER_DIR
+
+sudo cp ../conf/cozy-indexer.service /etc/systemd/system/
+sudo systemctl start cozy-indexer \
+  || sudo systemctl restart cozy-indexer
+sudo systemctl enable cozy-indexer
+sudo yunohost service add cozy-indexer -l /var/log/cozy/indexer.log
+check_start 9102 || (echo "cozy-indexer failed to start" && exit 1)
+
+
+# Configure Cozy Controller
+sudo cp ../conf/cozy-controller /etc/systemd/system/
+sudo systemctl start cozy-controller \
+  || sudo systemctl restart cozy-controller
+sudo systemctl enable cozy-controller
+sudo yunohost service add cozy-controller -l /var/log/cozy/controller.log
+check_start 9002 || (echo "cozy-controller failed to start" && exit 1)
+
+
+# Install Cozy platform apps
+[ -d /usr/local/cozy/apps/data-system ] \
+  || sudo cozy-monitor install-cozy-stack
+sudo cozy-monitor start data-system
+
+[ -d /usr/local/cozy/apps/home ] \
+  || sudo cozy-monitor install home
+sudo cozy-monitor start home
+
+[ -d /usr/local/cozy/apps/proxy ] \
+  || sudo cozy-monitor install proxy
+sudo cozy-monitor start proxy
+
+
+# Set Cozy domain
+sudo coffee /usr/local/cozy/apps/home/commands.coffee setdomain $domain \
+  || echo "Domain already set"
+
+
+# Install default applications
+for app in calendar contacts photos emails files sync; do
+    sudo cozy-monitor install $app > /dev/null \
+      || echo "$app is already installed"
+done
+
+
+# Install import-from-google
+sudo cozy-monitor install import-from-google \
+  -r https://github.com/cozy-labs/import-from-google.git \
+  || echo "import-from-google is already installed"
+
+
+# Configure Nginx
+sudo cp ../conf/nginx.conf /etc/nginx/conf.d/$domain.d/shout.conf
+sudo service nginx reload
+
+sudo yunohost app setting cozy unprotected_uris -v "/"
+sudo yunohost app ssowatconf

@@ -1,0 +1,26 @@
+{
+    "name": "Cozy",
+    "id": "cozy",
+    "description": {
+        "en": "a Personal Cloud you can host, customize and fully control",
+        "fr": "un Cloud personnel que vous pouvez héberger, personnaliser et entièrement contrôler"
+    },
+    "maintainer": {
+        "name": "kload",
+        "email": "kload@kload.fr"
+    },
+    "multi_instance": "false",
+    "arguments": {
+        "install" : [
+            {
+                "name": "domain",
+                "type": "domain",
+                "ask": {
+                    "en": "Choose a domain that will be dedicated to Cozy",
+                    "fr": "Choisissez le domaine qui sera dédié à Cozy"
+                },
+                "example": "cozy.domain.org"
+            }
+        ]
+    }
+}

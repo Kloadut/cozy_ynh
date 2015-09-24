@@ -1,0 +1,11 @@
+[Service]
+RootDirectory=/var/lib/cozy-indexer
+ExecStart=cozy-indexer
+Restart=always
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=cozy-indexer
+User=cozy
+
+[Install]
+WantedBy=multi-user.target

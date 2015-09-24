@@ -1,0 +1,11 @@
+[Service]
+ExecStart=cozy-controller
+Restart=always
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=cozy-controller
+User=root
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
